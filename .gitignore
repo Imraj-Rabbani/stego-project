@@ -1,0 +1,96 @@
+# ─── Python ─────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# ─── Virtual Environments ────────────────────────────────────────────────────
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+conda-env/
+
+# ─── IDE & Editor ────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+.project
+.pydevproject
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+# ─── Large Data Files (Dataset) ──────────────────────────────────────────────
+processed_dataset/
+*.npy
+*.npz
+*.pkl
+*.pickle
+raw_data/
+data/
+
+# ─── Model Checkpoints & Output ──────────────────────────────────────────────
+finetune_output/
+checkpoint_*/
+*.pt
+*.pth
+*.onnx
+validation_output/
+output/
+results/
+checkpoints/
+
+# ─── Logs & Temporary Files ──────────────────────────────────────────────────
+*.log
+training_log.txt
+*.tmp
+*.temp
+.cache/
+
+# ─── Environment Variables ──────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+
+# ─── OS-specific ────────────────────────────────────────────────────────────
+Thumbs.db
+.AppleDouble
+.LSOverride
+
+# ─── Jupyter/IPython ────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+# ─── CUDA/GPU ────────────────────────────────────────────────────────────────
+*.dll
+*.so
+*.o
+
+# ─── Package managers ───────────────────────────────────────────────────────
+poetry.lock
+Pipfile.lock
+requirements-lock.txt
