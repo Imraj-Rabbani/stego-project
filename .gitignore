@@ -59,7 +59,6 @@ checkpoint_*/
 *.pt
 *.pth
 *.onnx
-validation_output/
 output/
 results/
 checkpoints/

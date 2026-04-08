@@ -1,0 +1,17 @@
+BASELINE
+  dct_mid_ratio: 0.03685099375211502
+  dct_mid_ratio_std: 0.01694499322935259
+  capacity_bits: 147456
+  psnr_db: 30.027582312293543
+  ssim: 0.9941543006468585
+  bit_accuracy: 0.4654296875
+  n_images: 10
+
+FINETUNED
+  dct_mid_ratio: 0.0672848340935958
+  dct_mid_ratio_std: 0.04439011394343042
+  capacity_bits: 147456
+  psnr_db: 30.944834866465897
+  ssim: 0.9859293672147699
+  bit_accuracy: 0.494140625
+  n_images: 10
