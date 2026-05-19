@@ -1,17 +1,23 @@
 BASELINE
-  dct_mid_ratio: 0.03685099375211502
-  dct_mid_ratio_std: 0.01694499322935259
-  capacity_bits: 147456
-  psnr_db: 30.027582312293543
-  ssim: 0.9941543006468585
-  bit_accuracy: 0.4654296875
+  dct_mid_ratio: 0.03682965941600454
+  dct_mid_ratio_std: 0.016818965603114983
+  capacity_bits: 18702
+  K_mean: 17.3
+  psnr_db: 49.56898791801642
+  ssim: 0.9970988555427025
+  bit_accuracy: 0.38828125
+  exact_recovery: 0.2
   n_images: 10
+  n_embedded: 10
 
 FINETUNED
-  dct_mid_ratio: 0.0672848340935958
-  dct_mid_ratio_std: 0.04439011394343042
-  capacity_bits: 147456
-  psnr_db: 30.944834866465897
-  ssim: 0.9859293672147699
-  bit_accuracy: 0.494140625
+  dct_mid_ratio: 0.5713864546668954
+  dct_mid_ratio_std: 0.04265671530164003
+  capacity_bits: 39858
+  K_mean: 38.0
+  psnr_db: 47.71531013686477
+  ssim: 0.9999318612434557
+  bit_accuracy: 0.0
+  exact_recovery: 0.0
   n_images: 10
+  n_embedded: 10

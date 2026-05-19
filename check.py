@@ -20,7 +20,7 @@ from PIL import Image
 from torchvision import transforms
 
 # ─── Config (must match finetune.py) ─────────────────────────────────────────
-DATASET_DIR  = Path("./processed_dataset")
+DATASET_DIR  = Path("E:/processed_dataset")
 RESOLUTION   = 256
 DCT_SHAPE    = (3, 32, 32, 8, 8)
 BATCH_SIZE   = 32

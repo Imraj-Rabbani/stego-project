@@ -39,7 +39,7 @@ MIN_SHORT_DIM = 150          # discard images below this threshold
 DCT_BLOCK     = 8            # block size for DCT
 NUM_BLOCKS    = TARGET_SIZE // DCT_BLOCK  # 32 blocks per spatial axis
 
-HF_DATASET    = "imraj-rabbani/filtered-midfreq-imagenet"
+HF_DATASET    = "imraj-rabbani/filtered-imagenet"
 HF_SPLIT      = "train"      # change to "all" or None to get every split
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -107,13 +107,15 @@ def main():
 
     # ── Load dataset ──────────────────────────────────────────────────────────
     print(f"[preprocess] Loading dataset: {HF_DATASET} (split='{args.split}') …")
-    dataset = load_dataset(HF_DATASET, split=args.split, trust_remote_code=True)
+    dataset = load_dataset(HF_DATASET, split=args.split, verification_mode="no_checks")
     total_raw = len(dataset)
     print(f"[preprocess] Found {total_raw:,} images in the dataset.\n")
 
-    # ── Process images ────────────────────────────────────────────────────────
-    n_saved    = 0
+    # ── Resume logic ──────────────────────────────────────────────────────────
+    existing = sorted(output_dir.glob("img_*.png"))
+    n_saved = len(existing)
     n_discarded = 0
+    print(f"[preprocess] Resuming from {n_saved} already saved images.")
 
     # Zero-pad index width to accommodate the full dataset size
     idx_width = max(5, math.floor(math.log10(total_raw)) + 1)
@@ -148,10 +150,17 @@ def main():
         pil_img = center_crop_to_square(pil_img)
         pil_img = pil_img.resize((TARGET_SIZE, TARGET_SIZE), Image.LANCZOS)
 
-        # ── Save PNG ──────────────────────────────────────────────────────────
+        # ── Increment counter and build file paths ────────────────────────────
         n_saved += 1
         stem = f"img_{n_saved:0{idx_width}d}"
         png_path = output_dir / f"{stem}.png"
+        npy_path = output_dir / f"{stem}_dct.npy"
+
+        # ── Skip if already processed (resume logic) ──────────────────────────
+        if png_path.exists() and npy_path.exists():
+            continue
+
+        # ── Save PNG ──────────────────────────────────────────────────────────
         pil_img.save(png_path, format="PNG", optimize=False)
 
         # ── Compute block-wise 8×8 DCT ────────────────────────────────────────
@@ -159,7 +168,6 @@ def main():
         img_np = np.array(pil_img, dtype=np.float32) / 127.5 - 1.0  # (256,256,3)
         dct_tensor = compute_block_dct(img_np)                        # (3,32,32,8,8)
 
-        npy_path = output_dir / f"{stem}_dct.npy"
         np.save(npy_path, dct_tensor)
 
     # ── Summary ───────────────────────────────────────────────────────────────

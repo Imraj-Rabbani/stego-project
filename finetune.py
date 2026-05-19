@@ -4,20 +4,42 @@ finetune.py
 Thesis: Image Steganography via Diffusion Models
 Stage : Fine-tune Stable Diffusion v1.5 with DCT Auxiliary Loss
 
-Training objective
-──────────────────
-    L_total = L_diffusion + λ · L_DCT
+This script supports TWO loss modes (selected via --loss_mode):
 
-    L_diffusion = MSE(ε, ε_θ(x_t, t))               ← standard DDPM loss
+──────────────────────────────────────────────────────────────────────────────
+  Mode 1 (default): "mid_reward"  — directly maximize DSTG-eligible mid-band
+                                    coefficients (matches K metric in validate.py)
+──────────────────────────────────────────────────────────────────────────────
+    L_total = L_diffusion − λ_mid · mean(score)
 
-    L_DCT       = Σ_{u,v} W(u,v) · (DCT(x̂₀)[u,v] - DCT(x₀)[u,v])²
-                  where x̂₀ = (x_t - √(1−ᾱ_t)·ε_θ) / √(ᾱ_t)
+    where score is a smooth approximation of DSTG's hard eligibility test:
+        Y(x̂₀)         : differentiable BT.601 luminance of x̂₀, level-shifted by 128
+        coeffs        : block-wise 8×8 DCT of Y
+        q             : coeffs / Q_TABLE        (continuous — no rounding)
+        score[u,v]    : sigmoid((|q[u,v]| − 2) · sharpness)
+        mean(score)   : averaged over batch · blocks · stable mid positions
+
+    Stable mid positions = the 39 positions DSTG uses (non-DC, Q ≥ 8).
+    Each score is in [0, 1] and saturates around |q| ≈ 4–5, so the model
+    cannot win by inflating magnitudes endlessly — only by pushing more
+    coefficients across the embedability threshold.
+
+──────────────────────────────────────────────────────────────────────────────
+  Mode 2 (legacy): "dct_match"  — original spectral matching loss
+──────────────────────────────────────────────────────────────────────────────
+    L_total = L_diffusion + λ_dct · L_DCT
+
+    L_DCT       = Σ_{u,v} W(u,v) · (DCT(x̂₀)[u,v] − DCT(x₀)[u,v])²
 
     W(u,v) frequency mask
       DC  (u+v == 0)       : 0.1
       Mid (3 ≤ u+v ≤ 10)  : 1.0 … 2.0  (linearly interpolated)
       High (u+v > 10)      : 0.3
       Remaining low-freq   : 0.5  (1 ≤ u+v < 3)
+
+In both modes:
+    L_diffusion = MSE(ε, ε_θ(x_t, t))               ← standard DDPM loss
+    x̂₀          = (x_t − √(1−ᾱ_t)·ε_θ) / √(ᾱ_t)   ← x₀ estimate (latent → VAE decode)
 
 Model   : runwayml/stable-diffusion-v1-5  (pixel-space UNet only)
 Adapter : LoRA  rank=4  on Q,K,V projections (via peft)
@@ -28,7 +50,10 @@ Scheduler: CosineAnnealingLR + 1 000-step linear warmup
 Usage
 ─────
     pip install torch torchvision diffusers accelerate peft wandb tqdm pillow numpy
-    python finetune.py [--lambda_dct 0.1] [--steps 80000] [--use_wandb]
+    # Default (new) mode — directly maximize DSTG-eligible mid coefficients:
+    python finetune.py --loss_mode mid_reward --lambda_mid 0.01 --steps 80000
+    # Legacy spectral matching mode:
+    python finetune.py --loss_mode dct_match  --lambda_dct  0.1  --steps 80000
 """
 
 import os
@@ -62,26 +87,44 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger(__name__)
 
 # ─── Paths & defaults ─────────────────────────────────────────────────────────
-DATASET_DIR   = Path("./processed_dataset")
+DATASET_DIR = Path("E:/processed_dataset")
 OUTPUT_DIR    = Path("./finetune_output")
 MODEL_ID      = "runwayml/stable-diffusion-v1-5"
 
 # ─── Training hyper-parameters (from thesis spec) ─────────────────────────────
 RESOLUTION         = 256
-BATCH_SIZE         = 4             # reduced from 32; effective batch = 4 x 8 = 32
-GRAD_ACCUM_STEPS   = 8             # accumulate 8 micro-steps before each optimizer update
+BATCH_SIZE         = 2             # reduced from 32; effective batch = 4 x 8 = 32
+GRAD_ACCUM_STEPS   = 4             # accumulate 8 micro-steps before each optimizer update
 TRAIN_STEPS        = 80_000        # extend to 200 000 for full run
 WARMUP_STEPS       = 1_000
 LR                 = 1e-5
 WEIGHT_DECAY       = 1e-2
 GRAD_CLIP          = 1.0
 EMA_DECAY          = 0.9999
-CHECKPOINT_EVERY   = 5_000
-LAMBDA_DCT_DEFAULT = 0.1
+CHECKPOINT_EVERY   = 2_000
+LAMBDA_DCT_DEFAULT = 0.1           # weight for legacy "dct_match" loss
+LAMBDA_MID_DEFAULT = 0.01          # weight for new "mid_reward" loss (much smaller!)
+MID_SHARPNESS      = 2.0           # sigmoid sharpness for smooth eligibility
 LORA_RANK          = 4
-DATALOADER_WORKERS = 16
+DATALOADER_WORKERS = 4
 DCT_BLOCK          = 8
 NUM_BLOCKS         = RESOLUTION // DCT_BLOCK   # 32
+
+# ─── DSTG-aligned constants (must match validate.py / DCT_Adaptive.py) ────────
+# The JPEG luminance quantisation table that DSTG uses for its |q|≥2 test.
+# We use the SAME table here so the training loss directly tracks what
+# validate.py measures as "K" (count of eligible mid-band coefficients).
+_Q_TABLE_VALUES = [
+    [ 3,  2,  2,  3,  4,  6,  8, 10],
+    [ 2,  2,  3,  4,  5,  9, 10,  9],
+    [ 3,  3,  4,  5,  6,  9, 11,  9],
+    [ 3,  4,  5,  6,  8, 14, 13, 10],
+    [ 4,  5,  7,  9, 11, 17, 16, 12],
+    [ 5,  7,  9, 10, 13, 17, 18, 15],
+    [10, 13, 12, 14, 16, 19, 19, 17],
+    [14, 17, 18, 18, 19, 18, 19, 17],
+]
+ELIGIBILITY_THRESHOLD = 2.0        # matches DSTG's |q| ≥ 2 eligibility test
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -203,6 +246,29 @@ def build_freq_weight_mask(device="cpu", dtype=torch.bfloat16) -> torch.Tensor:
     return W.to(dtype=dtype, device=device)      # (8, 8)
 
 
+def build_q_table_tensor(device="cpu", dtype=torch.bfloat16) -> torch.Tensor:
+    """
+    Build the JPEG luminance quantisation table (matches DSTG / validate.py).
+    Shape (8, 8). This is the SAME table that validate.py's DSTG extractor uses
+    for its |q| ≥ 2 eligibility test, so the training loss directly tracks
+    the K metric reported during validation.
+    """
+    return torch.tensor(_Q_TABLE_VALUES, dtype=torch.float32).to(dtype=dtype,
+                                                                  device=device)
+
+
+def build_stable_mid_mask(q_table: torch.Tensor) -> torch.Tensor:
+    """
+    Build a (8, 8) boolean mask of DSTG's 39 "stable" mid-band positions:
+    every non-DC position where Q[u,v] ≥ 8.  These are the only positions
+    DSTG considers for embedding, so they are the only positions whose
+    eligibility we reward.
+    """
+    mask = (q_table.float() >= 8.0)
+    mask[0, 0] = False                        # exclude DC
+    return mask.to(dtype=q_table.dtype, device=q_table.device)   # (8, 8), 0/1
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  EMA helper
 # ══════════════════════════════════════════════════════════════════════════════
@@ -315,6 +381,74 @@ def compute_dct_loss(
     return weighted.mean()
 
 
+def compute_mid_band_reward_loss(
+    x_hat_0:    torch.Tensor,   # (B, 3, 256, 256)   denoised estimate in [-1, 1] RGB
+    dct_basis:  torch.Tensor,   # (8, 8)
+    q_table:    torch.Tensor,   # (8, 8)
+    mid_mask:   torch.Tensor,   # (8, 8)            DSTG stable mid positions (0/1)
+    sharpness:  float = MID_SHARPNESS,
+) -> torch.Tensor:
+    """
+    Differentiable, DSTG-aligned mid-band eligibility reward.
+
+    The validator (validate.py) measures K = count of mid-band positions per block
+    where |round(coeff_Y / Q[u,v])| ≥ 2.  We replicate this test smoothly:
+
+        Y(x̂₀)         : BT.601 luminance, scaled to [0, 255], level-shifted by 128
+        coeff[u,v]    : 8×8 block DCT of Y                             (differentiable)
+        q[u,v]        : coeff[u,v] / Q[u,v]                            (continuous)
+        score[u,v]    : sigmoid((|q[u,v]| − 2) · sharpness)            (in [0, 1])
+        reward        : mean of score over batch · blocks · mid_mask positions
+
+    The returned loss is −reward, so MINIMIZING it MAXIMIZES the mean number of
+    DSTG-eligible mid-band coefficients per block.
+
+    Each per-position score saturates around |q| ≈ 4–5, so the model gains
+    nothing by inflating coefficient magnitudes beyond what's needed to clear
+    the embedability threshold.  This keeps the training signal stable and
+    prevents the model from producing high-magnitude artefacts.
+    """
+    B = x_hat_0.shape[0]
+
+    # ── BT.601 luminance, differentiable, in centered uint8-equivalent range ──
+    # x_hat_0 is in [-1, 1] RGB; rescale to [0, 255] per channel, then take Y,
+    # then level-shift by 128 to match DSTG's "pixel − 128" convention.
+    R = x_hat_0[:, 0]
+    G = x_hat_0[:, 1]
+    Bc = x_hat_0[:, 2]
+    R8 = (R + 1.0) * 127.5
+    G8 = (G + 1.0) * 127.5
+    B8 = (Bc + 1.0) * 127.5
+    Y = 0.299 * R8 + 0.587 * G8 + 0.114 * B8       # (B, H, W)
+    Y_centered = Y - 128.0                          # (B, H, W)
+
+    # ── Block-DCT of Y (single-channel; same einsum recipe as block_dct2d) ────
+    H, W = Y_centered.shape[-2:]
+    Bh, Bw = H // DCT_BLOCK, W // DCT_BLOCK
+    blocks = (Y_centered
+              .reshape(B, Bh, DCT_BLOCK, Bw, DCT_BLOCK)
+              .permute(0, 1, 3, 2, 4)
+              .contiguous())                        # (B, Bh, Bw, 8, 8)
+    after_rows = torch.einsum("ki,...ij->...kj", dct_basis, blocks)
+    coeff      = torch.einsum("lj,...kj->...kl", dct_basis, after_rows)  # (B,Bh,Bw,8,8)
+
+    # ── Continuous quantization index q = coeff / Q[u,v] ─────────────────────
+    q_cont = coeff / q_table                        # (B, Bh, Bw, 8, 8)
+
+    # ── Smooth eligibility score: sigmoid((|q| − 2) · sharpness) ─────────────
+    score = torch.sigmoid((q_cont.abs() - ELIGIBILITY_THRESHOLD) * sharpness)
+    score = score * mid_mask                        # zero out non-stable positions
+
+    # ── Mean per-block eligible-count, averaged over batch ────────────────────
+    # Sum across the (8, 8) positions gives a per-block count-like score,
+    # then mean over batch and spatial blocks.
+    per_block = score.sum(dim=(-2, -1))             # (B, Bh, Bw)
+    reward    = per_block.mean()                    # scalar
+
+    # Negate so that minimizing the loss maximizes the reward
+    return -reward
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  Main training loop
 # ══════════════════════════════════════════════════════════════════════════════
@@ -323,8 +457,16 @@ def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--dataset_dir",  type=str,   default=str(DATASET_DIR))
     p.add_argument("--output_dir",   type=str,   default=str(OUTPUT_DIR))
+    p.add_argument("--loss_mode",    type=str,   default="mid_reward",
+                   choices=["mid_reward", "dct_match"],
+                   help="'mid_reward' (NEW, default): maximize DSTG-eligible mid coeffs. "
+                        "'dct_match' (legacy): spectral matching of training-set DCT.")
+    p.add_argument("--lambda_mid",   type=float, default=LAMBDA_MID_DEFAULT,
+                   help="Weight for mid_reward loss. Ablate: 0.005, 0.01, 0.05.")
+    p.add_argument("--mid_sharpness", type=float, default=MID_SHARPNESS,
+                   help="Sigmoid sharpness for smooth eligibility. 2.0 ≈ DSTG hard count.")
     p.add_argument("--lambda_dct",   type=float, default=LAMBDA_DCT_DEFAULT,
-                   help="Weight of DCT auxiliary loss. Ablate: 0.05, 0.1, 0.5, 1.0")
+                   help="Weight of legacy dct_match loss. Ablate: 0.05, 0.1, 0.5, 1.0")
     p.add_argument("--steps",        type=int,   default=TRAIN_STEPS)
     p.add_argument("--lora_rank",    type=int,   default=LORA_RANK)
     p.add_argument("--use_wandb",    action="store_true")
@@ -361,6 +503,11 @@ def _main_body(args, device, dtype, output_dir):
     # ── Precompute DCT helpers (once, on GPU) ─────────────────────────────
     dct_basis = build_dct_basis(DCT_BLOCK, device=device, dtype=dtype)
     freq_mask = build_freq_weight_mask(device=device, dtype=dtype)
+    q_table   = build_q_table_tensor(device=device, dtype=dtype)
+    mid_mask  = build_stable_mid_mask(q_table)
+    log.info(f"Loss mode: {args.loss_mode}  "
+             f"(λ_mid={args.lambda_mid}, λ_dct={args.lambda_dct}, "
+             f"sharpness={args.mid_sharpness})")
 
     # ── Load SD 1.5 components ─────────────────────────────────────────────
     log.info(f"Loading model: {MODEL_ID}")
@@ -443,7 +590,7 @@ def _main_body(args, device, dtype, output_dir):
         batch_size        = BATCH_SIZE,
         shuffle           = True,
         num_workers       = DATALOADER_WORKERS,
-        pin_memory        = True,
+        pin_memory        = False,
         persistent_workers = True,
         drop_last         = True,
     )
@@ -528,18 +675,35 @@ def _main_body(args, device, dtype, output_dir):
             x_hat_0_pixels = vae.decode(x_hat_0_latent).sample           # (B,3,256,256)
 
             # ── DCT auxiliary loss ────────────────────────────────────────
-            # Use precomputed DCT coefficients from the .npy cache as the
-            # clean x₀ target — no second VAE decode needed.
-            # dct_cache shape: (B, 3, 32, 32, 8, 8), already on GPU.
-            loss_dct = compute_dct_loss(x_hat_0_pixels, dct_cache,
-                                        dct_basis, freq_mask)
+            # Two modes selectable via --loss_mode:
+            #
+            #   "mid_reward" (default, NEW):
+            #       Directly maximize the count of DSTG-eligible mid-band
+            #       coefficients in x̂₀.  Returns a negative scalar; minimizing
+            #       it maximizes the smooth eligibility score.  No .npy cache
+            #       needed — the reward is computed from x̂₀ alone.
+            #
+            #   "dct_match" (legacy):
+            #       Squared error between x̂₀'s DCT and the precomputed clean-x₀
+            #       DCT from the .npy cache, weighted by W(u,v).
+            if args.loss_mode == "mid_reward":
+                loss_aux = compute_mid_band_reward_loss(
+                    x_hat_0_pixels, dct_basis, q_table, mid_mask,
+                    sharpness=args.mid_sharpness,
+                )
+                lambda_aux = args.lambda_mid
+            else:                                       # "dct_match"
+                loss_aux = compute_dct_loss(
+                    x_hat_0_pixels, dct_cache, dct_basis, freq_mask,
+                )
+                lambda_aux = args.lambda_dct
 
             # ── Total loss (scaled by accum steps for correct gradient magnitude) ──
-            loss = (loss_diff + args.lambda_dct * loss_dct) / GRAD_ACCUM_STEPS
+            loss = (loss_diff + lambda_aux * loss_aux) / GRAD_ACCUM_STEPS
             loss.backward()
 
             accum_loss_diff += loss_diff.item()
-            accum_loss_dct  += loss_dct.item()
+            accum_loss_dct  += loss_aux.item()
 
         # ── Optimizer step (once per GRAD_ACCUM_STEPS micro-batches) ─────
         nn.utils.clip_grad_norm_(trainable_params, GRAD_CLIP)
@@ -551,22 +715,37 @@ def _main_body(args, device, dtype, output_dir):
 
         # Average losses over accumulation steps for logging
         loss_diff = torch.tensor(accum_loss_diff / GRAD_ACCUM_STEPS)
-        loss_dct  = torch.tensor(accum_loss_dct  / GRAD_ACCUM_STEPS)
-        loss      = loss_diff + args.lambda_dct * loss_dct
+        loss_aux  = torch.tensor(accum_loss_dct  / GRAD_ACCUM_STEPS)
+        lambda_aux = (args.lambda_mid if args.loss_mode == "mid_reward"
+                      else args.lambda_dct)
+        loss      = loss_diff + lambda_aux * loss_aux
 
         # ── Logging ───────────────────────────────────────────────────────
+        # For "mid_reward" mode loss_aux is negative (reward); we ALSO log the
+        # raw eligibility count = -loss_aux so the number is interpretable
+        # (typical value: 5–20 eligible coefficients per block).
+        eligible_per_block = (-loss_aux.item() if args.loss_mode == "mid_reward"
+                              else None)
         log_dict = {
             "loss/total"    : loss.item(),
             "loss/diffusion": loss_diff.item(),
-            "loss/dct"      : loss_dct.item(),
+            "loss/aux"      : loss_aux.item(),
+            "loss_mode"     : args.loss_mode,
             "lr"            : lr_scheduler.get_last_lr()[0],
             "step"          : global_step,
         }
-        progress_bar.set_postfix({
-            "loss": f"{loss.item():.4f}",
+        if eligible_per_block is not None:
+            log_dict["mid_eligible_per_block"] = eligible_per_block
+
+        postfix = {
+            "loss":   f"{loss.item():.4f}",
             "l_diff": f"{loss_diff.item():.4f}",
-            "l_dct": f"{loss_dct.item():.4f}",
-        })
+        }
+        if args.loss_mode == "mid_reward":
+            postfix["elig"] = f"{eligible_per_block:.2f}"
+        else:
+            postfix["l_dct"] = f"{loss_aux.item():.4f}"
+        progress_bar.set_postfix(postfix)
 
         if args.use_wandb:
             import wandb
